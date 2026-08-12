@@ -17,14 +17,14 @@ def plot_results(file_name):
         {
             "font.family": "sans-serif",
             "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
-            "font.size": 14,  # Base font size
-            "axes.titlesize": 20,  # Much bigger titles
-            "axes.labelsize": 20,  # Bigger axis labels
+            "font.size": 22,  # Base font size
+            "axes.titlesize": 30,  # Much bigger titles
+            "axes.labelsize": 28,  # Bigger axis labels
             # 'axes.titleweight': 'bold',   # Bold titles
-            "xtick.labelsize": 14,  # Bigger x-axis ticks
-            "ytick.labelsize": 14,  # Bigger y-axis ticks
-            "legend.fontsize": 16,  # Bigger legend text
-            "legend.title_fontsize": 16,  # Bigger legend title
+            "xtick.labelsize": 22,  # Bigger x-axis ticks
+            "ytick.labelsize": 22,  # Bigger y-axis ticks
+            "legend.fontsize": 24,  # Bigger legend text
+            "legend.title_fontsize": 24,  # Bigger legend title
             "legend.frameon": True,
             "legend.framealpha": 0.95,  # Opaque background for readability
             "legend.fancybox": True,  # Rounded corners

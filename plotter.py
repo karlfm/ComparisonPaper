@@ -29,18 +29,24 @@ class ComparisonPlotter:
         else:
             self.axs = axs
 
-        self.fig.suptitle(f"{model_name}", fontsize=24, fontweight="bold")
+        self.fig.suptitle(f"{model_name}", fontsize=40, fontweight="bold")
 
     def _get_ax(self, ax_coords):
         """Get axis with consistent indexing regardless of grid shape."""
         return self.axs[ax_coords[0], ax_coords[1]]
+
+    def _panel_label(self, ax_coords):
+        """Panel letter in reading order (row-major), e.g. (a), (b), ..."""
+        row, col = ax_coords
+        index = row * self.grid_shape[1] + col
+        return chr(ord("a") + index)
 
     def plot_spatial_panel(
         self, ax_coords, title, ylabel, data_1d, data_2d_hist=None, set_point=None
     ):
         """Plots a standard 1D vs 2D comparison over the radius."""
         ax = self._get_ax(ax_coords)
-        ax.set_title(title)
+        ax.set_title(f"({self._panel_label(ax_coords)}) {title}")
         ax.set_ylabel(ylabel)
         ax.set_xlabel("R")
         ax.grid(True)

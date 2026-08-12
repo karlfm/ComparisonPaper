@@ -8,13 +8,15 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Model label -> (json file, line color)
+# Model label -> (json file, line color, linestyle, marker)
+# Color alone doesn't survive grayscale printing, so each model also gets a
+# distinct linestyle and marker (reviewer request).
 MODELS = {
-    "KDAB": ("KFR_ODE_data.json", "C0"),
-    "KOM": ("KOM_ODE_data.json", "C1"),
-    "LT": ("LT2_ODE_data.json", "C2"),
-    "GAPK (stress)": ("GCG_ODE_data.json", "C3"),
-    "GAPK (strain)": ("GEG_ODE_data.json", "C4"),
+    "KDAB": ("KFR_ODE_data.json", "C0", "-", "o"),
+    "KOM": ("KOM_ODE_data.json", "C1", "--", "s"),
+    "LT": ("LT2_ODE_data.json", "C2", "-.", "^"),
+    "GAPK (stress)": ("GCG_ODE_data.json", "C3", ":", "D"),
+    "GAPK (strain)": ("GEG_ODE_data.json", "C4", (0, (3, 1, 1, 1)), "v"),
 }
 
 PANELS = [
@@ -37,13 +39,13 @@ def plot_results():
         {
             "font.family": "sans-serif",
             "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
-            "font.size": 14,
-            "axes.titlesize": 20,
-            "axes.labelsize": 20,
-            "xtick.labelsize": 14,
-            "ytick.labelsize": 14,
-            "legend.fontsize": 16,
-            "legend.title_fontsize": 16,
+            "font.size": 22,
+            "axes.titlesize": 30,
+            "axes.labelsize": 28,
+            "xtick.labelsize": 22,
+            "ytick.labelsize": 22,
+            "legend.fontsize": 24,
+            "legend.title_fontsize": 24,
             "legend.frameon": True,
             "legend.framealpha": 0.95,
             "legend.fancybox": True,
@@ -56,24 +58,35 @@ def plot_results():
     )
 
     final_states = {}
-    for label, (file_name, color) in MODELS.items():
+    for label, (file_name, color, linestyle, marker) in MODELS.items():
         data = json.loads(Path(file_name).read_text())
         R_range = np.array(data["R_range"])
         plot_data = data["plot_data_1d"]
         final_states[label] = {
             "R_range": R_range,
             "color": color,
+            "linestyle": linestyle,
+            "marker": marker,
             **{key: np.array(plot_data[key][-1]) for _, _, key, _ in PANELS},
         }
 
     fig, axs = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle("Comparison of Final Simulated States", fontsize=24, fontweight="bold")
+    fig.suptitle("Comparison of Final Simulated States", fontsize=40, fontweight="bold")
 
-    for title, ylabel, key, (row, col) in PANELS:
+    for panel_index, (title, ylabel, key, (row, col)) in enumerate(PANELS):
         ax = axs[row, col]
         for label, state in final_states.items():
-            ax.plot(state["R_range"], state[key], color=state["color"], label=label)
-        ax.set_title(title)
+            ax.plot(
+                state["R_range"],
+                state[key],
+                color=state["color"],
+                linestyle=state["linestyle"],
+                marker=state["marker"],
+                markevery=8,
+                markersize=9,
+                label=label,
+            )
+        ax.set_title(f"({chr(ord('a') + panel_index)}) {title}")
         ax.set_xlabel("$R$")
         ax.set_ylabel(ylabel)
         ax.grid(True)
