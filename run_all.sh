@@ -1,0 +1,11 @@
+python GAPK_strain.py
+python GAPK_strain_plot.py
+python GAPK_stress.py
+python GAPK_stress_plot.py
+python KDAB.py
+python KDAB_plot.py
+python KOM.py
+python KOM_plot.py
+python LT.py
+python LT_plot.py
+python summary_comparison.py

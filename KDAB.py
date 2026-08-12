@@ -4,6 +4,7 @@ import time
 import plotter
 import saver
 
+
 def main():
     # Initialize base state
     # Initialize base state
@@ -11,35 +12,40 @@ def main():
     initial_gt = np.ones_like(R_range)
     initial_gr = np.ones_like(R_range)  # No initial growth
 
-    beta = 0.01 # they have 1.0 in their paper! How did they get that to converge?
-    mu = 1 #this is a_0 from their paper
+    beta = 0.01  # they have 1.0 in their paper! How did they get that to converge?
+    mu = 1  # this is a_0 from their paper
     stretch_set_point = np.sqrt(1.1)
-    #Green-Lagrange set point
-    strain_set_point = 0.5*(stretch_set_point**2 - 1)    # 0.105, in the paper strain_set_point is 0.13
+    # Green-Lagrange set point
+    strain_set_point = 0.5 * (
+        stretch_set_point**2 - 1
+    )  # 0.105, in the paper strain_set_point is 0.13
 
     class KFRState(BaseState):
-
         def compute_dgt(self, ri, s):
             """Compute growth rate based on circumferential stress."""
-            
+
             elastic_strain = self.elastic_hoop_strain(ri, s)
 
-            dg = (self.tau*(np.sqrt(2 * elastic_strain + 1) - 1 - self.set_point) + 1)**(1/3)
+            dg = (
+                self.tau * (np.sqrt(2 * elastic_strain + 1) - 1 - self.set_point) + 1
+            ) ** (1 / 3)
 
             return dg
-        
+
         def compute_dgr(self, ri, s):
             """Compute growth rate based on circumferential stress."""
-            
+
             elastic_strain = self.elastic_hoop_strain(ri, s)
 
-            dg = (self.tau*(np.sqrt(2 * elastic_strain + 1) - 1 - self.set_point) + 1)**(1/3)
+            dg = (
+                self.tau * (np.sqrt(2 * elastic_strain + 1) - 1 - self.set_point) + 1
+            ) ** (1 / 3)
 
             return dg
-        
+
         def compute_homeostasis(self, ri, s):
             """Compute homeostatic growth based on circumferential stress."""
-            
+
             # \frac{r}{R(1+s_\mathrm{hom})}
 
             r = self.compute_r(ri, s)
@@ -57,64 +63,72 @@ def main():
         gMax=None,
         set_point=strain_set_point,
         gamma=None,
-        tau=beta
+        tau=beta,
     )
 
-    
     print("Initial state:", base_state)
-    
+
     # Initial calculations
     ri = base_state.find_inner_radius()
     stress_points = np.arange(1, 2.1, 0.1)
     stress_data = [base_state.radial_stress(ri, x) for x in stress_points]
-    
+
     print(f"\nInitial inner radius: {ri:.15f}")
     print("Initial stress data:")
     print("[" + ",".join(f"{x:.15f}" for x in stress_data) + "]")
-    
+
     # Iterate state updates
     print("\nIterating states...")
     states = [base_state]
     current_state = base_state
-    
-    num_steps = 3000
+
+    num_steps = 2500  # matches KDAB_growth.png caption (2500 steps, sampled every 313)
     for step in range(1, num_steps + 1):  # 2 time steps
         start = time.time()
         if step % 100 == 0:
-            print(f"  Iteration {step}/{num_steps   }", end="", flush=True)
-            print(f" - {time.time()-start:.3f}s")
+            print(f"  Iteration {step}/{num_steps}", end="", flush=True)
+            print(f" - {time.time() - start:.3f}s")
         current_state = current_state.update()
         states.append(current_state)
-    
+
     # Final calculations
     print("\nFinal state:", states[-1])
-    
+
     last_state = states[-1]
     ri = last_state.find_inner_radius()
     stress_data = [last_state.radial_stress(ri, x) for x in stress_points]
-    
+
     # Convert PK1 stress to Cauchy stress
     # Multiply by (r/R)^2
     stress_data = [
-        stress_data[i] * (last_state.compute_r(ri, stress_points[i]) / stress_points[i])**2
+        stress_data[i]
+        * (last_state.compute_r(ri, stress_points[i]) / stress_points[i]) ** 2
         for i in range(len(stress_points))
-    ]    
+    ]
 
     print("\nFinal stress data:")
     print("[" + ",".join(f"{x:.15f}" for x in stress_data) + "]")
-    
+
     # Final gs values
-    gs = [state.gr_interp(np.arange(1, 2 + 1/64, 1/64)).tolist() 
-          for state in states]
+    gs = [
+        state.gr_interp(np.arange(1, 2 + 1 / 64, 1 / 64)).tolist() for state in states
+    ]
     print("\nFirst gs:", gs[0][:3], "...")
     print("Last gs:", gs[-1][:3], "...")
-    
+
     # --- Pre-calculate all data for plotting ---
     print("--- Pre-calculating data for plots ---")
     plot_data_1d = {
-        "radial_stress": [], "hoop_stress": [], "radial_strain": [],
-        "hoop_strain": [], "radial_growth": [], "hoop_growth": [], "displacement": [],
-        "Ricci": [], "Elastic Hoop Strain": [], "Homeostasis": []
+        "radial_stress": [],
+        "hoop_stress": [],
+        "radial_strain": [],
+        "hoop_strain": [],
+        "radial_growth": [],
+        "hoop_growth": [],
+        "displacement": [],
+        "Ricci": [],
+        "Elastic Hoop Strain": [],
+        "Homeostasis": [],
     }
     power_data = {"power": [], "entropy": [], "internal_entropy": []}
 
@@ -125,21 +139,49 @@ def main():
 
     for state in states_to_plot_1d:
         ri_1d = state.find_inner_radius()
-        plot_data_1d["radial_stress"].append(np.array([state.radial_stress(ri_1d, s) * (s / state.compute_r(ri_1d, s)) for s in R_range]))
-        plot_data_1d["hoop_stress"].append(np.array([state.angular_stress(ri_1d, s) * (state.compute_r(ri_1d, s) / s) / (state.gr_interp(s) * state.gt_interp(s)) for s in R_range]))
-        plot_data_1d["radial_strain"].append(np.array([state.radial_strain(ri_1d, s) for s in R_range]))
-        plot_data_1d["hoop_strain"].append(np.array([state.hoop_strain(ri_1d, s) for s in R_range]))
+        plot_data_1d["radial_stress"].append(
+            np.array(
+                [
+                    state.radial_stress(ri_1d, s) * (s / state.compute_r(ri_1d, s))
+                    for s in R_range
+                ]
+            )
+        )
+        plot_data_1d["hoop_stress"].append(
+            np.array(
+                [
+                    state.angular_stress(ri_1d, s)
+                    * (state.compute_r(ri_1d, s) / s)
+                    / (state.gr_interp(s) * state.gt_interp(s))
+                    for s in R_range
+                ]
+            )
+        )
+        plot_data_1d["radial_strain"].append(
+            np.array([state.radial_strain(ri_1d, s) for s in R_range])
+        )
+        plot_data_1d["hoop_strain"].append(
+            np.array([state.hoop_strain(ri_1d, s) for s in R_range])
+        )
         plot_data_1d["radial_growth"].append(state.gr)
         plot_data_1d["hoop_growth"].append(state.gt)
-        plot_data_1d["displacement"].append(np.array([state.compute_r(ri_1d, s) for s in R_range]))
-        plot_data_1d["Ricci"].append(np.array([state.Ricci_curvature(ri_1d, s) for s in R_range]))
-        plot_data_1d["Elastic Hoop Strain"].append(np.array([state.elastic_hoop_strain(ri_1d, s) for s in R_range]))
-        plot_data_1d["Homeostasis"].append(np.array([state.compute_homeostasis(ri_1d, s) for s in R_range]))
+        plot_data_1d["displacement"].append(
+            np.array([state.compute_r(ri_1d, s) for s in R_range])
+        )
+        plot_data_1d["Ricci"].append(
+            np.array([state.Ricci_curvature(ri_1d, s) for s in R_range])
+        )
+        plot_data_1d["Elastic Hoop Strain"].append(
+            np.array([state.elastic_hoop_strain(ri_1d, s) for s in R_range])
+        )
+        plot_data_1d["Homeostasis"].append(
+            np.array([state.compute_homeostasis(ri_1d, s) for s in R_range])
+        )
 
     # Calculate data between states (power)
     for i in range(number_of_lines - 1):
         state1 = states_to_plot_1d[i]
-        state2 = states_to_plot_1d[i+1]
+        state2 = states_to_plot_1d[i + 1]
         # power_split = KFR.power(state1, state2, R_range, dt)
         power_direct = BaseState.power_direct(state1, state2, R_range, beta)
         # power_data["split"].append(power_split)
@@ -148,21 +190,19 @@ def main():
         power_data["internal_entropy"].append(entropy)
         power_data["entropy"].append(power_direct - entropy)
         # power_data["difference"].append(power_direct - power_split)
-    
-    
+
     data = {
-    "plot_data_1d": plot_data_1d,
-    "power_data": power_data,
-    "R_range": R_range.tolist(),
-    "dt": beta,
-    "num_steps": num_steps,
-    "number_of_lines": number_of_lines,
-    "set_point": stretch_set_point,
+        "plot_data_1d": plot_data_1d,
+        "power_data": power_data,
+        "R_range": R_range.tolist(),
+        "dt": beta,
+        "num_steps": num_steps,
+        "number_of_lines": number_of_lines,
+        "set_point": stretch_set_point,
     }
 
     saver.save_data(data, "KFR_ODE_data.json")
 
-    
     # # --- Use the Plotter Class ---
     # plotter_instance = plotter.ComparisonPlotter(R_range, num_steps, model_name="KFR")
 
@@ -180,6 +220,7 @@ def main():
     # plotter_instance.plot_spatial_panel((2, 1), "Elastic Hoop Strain", "Displacement", plot_data_1d["Elastic Hoop Strain"], set_point=GL_set_point)
 
     # plotter_instance.finalize_and_save("ODE_KFR_results.png")
+
 
 if __name__ == "__main__":
     start_time = time.time()

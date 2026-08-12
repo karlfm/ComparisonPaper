@@ -2,8 +2,8 @@ from cylinder_functions import BaseState
 import numpy as np
 import saver
 
-''' 1D Solution '''
-#region
+""" 1D Solution """
+# region
 # Initialize base state
 R_range = np.linspace(1.0, 2.0, 64)
 initial_gt = np.ones_like(R_range)
@@ -16,38 +16,45 @@ stretch_set_point = 1.01
 # s_set = 0.5 * (lambda^2 - 1)
 E_set_point = 0.5 * (stretch_set_point**2 - 1)
 
+
 class KOMState(BaseState):
     """
     Implementation of the Kerckhoffs-Omens-McCulloch (KOM) growth law.
     Reference: Kerckhoffs et al. (2012)
     """
+
     def __init__(self, R, gr, gt, bc, mu, gMax, set_point, gamma, tau, params=None):
         super().__init__(R, gr, gt, bc, mu, gMax, set_point, gamma, tau)
-        
-        self.f_cc_max = 0.1  #f_cc,max in paper - Max fiber growth rate
-        self.f_ff_max = 0.3  #f_ff,max in paper - Max radial growth rate
-        
-        self.f_f = 150.0 # f_f in paper - Slope affecting sigmoid for fiber growth
+
+        self.f_cc_max = 0.1  # f_cc,max in paper - Max fiber growth rate
+        self.f_ff_max = 0.3  # f_ff,max in paper - Max radial growth rate
+
+        self.f_f = 150.0  # f_f in paper - Slope affecting sigmoid for fiber growth
         self.c_c = 75.0  # c_f in paper - Slope affecting sigmoid for radial growth
 
-        self.f_slope = 40.0 # f_length,slope in paper    - Slope affecting sigmoid for *total* fiber growth
-        self.c_slope = 60.0 # c_thickness,slope in paper - Slope affecting sigmoif for *total* radial growth
-        
-        self.sf_setpoint = 0.06 #0.06 # Stimulus at 50% max axial growth
-        self.sc_setpoint = 0.07 #0.07 # Stimulus at 50% max radial growth
+        self.f_slope = 40.0  # f_length,slope in paper    - Slope affecting sigmoid for *total* fiber growth
+        self.c_slope = 60.0  # c_thickness,slope in paper - Slope affecting sigmoif for *total* radial growth
+
+        self.sf_setpoint = 0.06  # 0.06 # Stimulus at 50% max axial growth
+        self.sc_setpoint = 0.07  # 0.07 # Stimulus at 50% max radial growth
+
+        # E_ff*, E_ss* in paper Table 1 - fiber (hoop) and cross-fiber (radial)
+        # strain set points, distinct from each other per the KOM model definition
+        self.E_ff_star = 0.0
+        self.E_ss_star = -0.3
 
     def growth_term(self, growth, slope):
         """
         Slope function to adjust steepness based on current growth state.
         """
         return 1 / (1.0 + np.exp(slope * (growth - self.gMax)))
-    
+
     def strain_term(self, height, slope, s, s_50):
         """
         Generic sigmoid function based on Eq 8 and 9
         g_inc = A / (1 + exp(-slope * (s - s50))) + 1
         """
-        
+
         if s >= 0:
             return height / (1.0 + np.exp(-slope * (s - s_50)))
         elif s < 0:
@@ -55,94 +62,116 @@ class KOMState(BaseState):
 
     def sf(self, ri, s):
         E_ff = self.elastic_hoop_strain(ri, s)
-        
-        stimulus_l = E_ff - self.set_point
+
+        stimulus_l = E_ff - self.E_ff_star
         return stimulus_l
-    
+
     def sr(self, ri, s):
         E_rr = self.elastic_radial_strain(ri, s)
-        E_zz = 0.0 # Plane strain assumption
-        
+        E_zz = 0.0  # Plane strain assumption
+
         E_cross_max = max(E_rr, E_zz)
-        stimulus_t = E_cross_max - self.set_point
+        stimulus_t = E_cross_max - self.E_ss_star
         return stimulus_t
 
     def compute_dgt(self, ri, s):
         """
         Fiber (Hoop) Growth.
-        Stimulus: s_l = max(E_ff) - E_set   
+        Stimulus: s_l = max(E_ff) - E_set
         """
 
         stimulus_f = self.sf(ri, s)
-        
+
         _growth_term = self.growth_term(self.gt_interp(s), self.f_slope)
-        _strain_term = self.strain_term(self.f_ff_max, self.f_f, stimulus_f, self.sf_setpoint)
-        
+        _strain_term = self.strain_term(
+            self.f_ff_max, self.f_f, stimulus_f, self.sf_setpoint
+        )
+
         return self.tau * _growth_term * _strain_term + 1
 
     def compute_dgr(self, ri, s):
         """
         Cross-Fiber (Radial) Growth.
-        Stimulus: s_t = max(E_rr, E_zz) - E_set   
+        Stimulus: s_t = max(E_rr, E_zz) - E_set
         """
 
         stimulus_r = self.sr(ri, s)
-        
+
         _growth_term = self.growth_term(self.gr_interp(s), self.c_slope)
-        _strain_term = self.strain_term(self.f_cc_max, self.c_c, stimulus_r, self.sc_setpoint)
+        _strain_term = self.strain_term(
+            self.f_cc_max, self.c_c, stimulus_r, self.sc_setpoint
+        )
 
         return np.sqrt(self.tau * _growth_term * _strain_term + 1)
-    
+
     def update(self):
         ri = self.find_inner_radius()
 
         F_inc_t = np.array([self.compute_dgt(ri, s) for s in self.R])
         new_gt = self.gt * F_inc_t
-        
+
         F_inc_r = np.array([self.compute_dgr(ri, s) for s in self.R])
         new_gr = self.gr * F_inc_r
 
         return self.__class__(
-            self.R, new_gr, new_gt, self.bc, self.mu,
-            self.gMax, self.set_point, self.gamma, self.tau
+            self.R,
+            new_gr,
+            new_gt,
+            self.bc,
+            self.mu,
+            self.gMax,
+            self.set_point,
+            self.gamma,
+            self.tau,
         )
+
 
 print("Using Green-Lagrange set point:", E_set_point)
 base_state = KOMState(
     R=R_range,
     gr=initial_gr,
     gt=initial_gt,
-    bc=-0.1,
+    bc=-0.15,
     mu=mu,
-    gMax=1.5, # In the other sims this is 0.5, but this is changed due to the sigmoid
+    gMax=1.5,  # In the other sims this is 0.5, but this is changed due to the sigmoid
     set_point=E_set_point,
     gamma=1,
-    tau=dt
+    tau=dt,
 )
 
 print("Initial state:", base_state)
 
 states = [base_state]
 prev_state = base_state
-num_steps = 3000 #32768
+num_steps = 3000  # 32768
 for step in range(1, num_steps + 1):
     if step % 10 == 0:
         print(f"Time step {step}")
     next_state = prev_state.update()
     states.append(next_state)
     prev_state = next_state
-#endregion
+# endregion
 
 # --- Pre-calculate all data for plotting ---
 print("--- Pre-calculating data for plots ---")
 plot_data_1d = {
-    "radial_stress": [], "hoop_stress": [], "radial_strain": [],
-    "hoop_strain": [], "radial_growth": [], "hoop_growth": [], "displacement": [],
-    "Ricci": [], "sr": [], "sf": [],
+    "radial_stress": [],
+    "hoop_stress": [],
+    "radial_strain": [],
+    "hoop_strain": [],
+    "radial_growth": [],
+    "hoop_growth": [],
+    "displacement": [],
+    "Ricci": [],
+    "sr": [],
+    "sf": [],
     # Sigmoid components
-    "growth_term_gt": [], "growth_term_gr": [],  # Growth limiting sigmoids
-    "strain_term_gt": [], "strain_term_gr": [],  # Strain-based sigmoids
-    "F_inc_t": [], "F_inc_r": []  # Growth increments
+    "growth_term_gt": [],
+    "growth_term_gr": [],  # Growth limiting sigmoids
+    "strain_term_gt": [],
+    "strain_term_gr": [],  # Strain-based sigmoids
+    "F_inc_t": [],
+    "F_inc_r": [],  # Growth increments
 }
 power_data = {"power": [], "entropy": [], "internal_entropy": []}
 
@@ -153,29 +182,71 @@ states_to_plot_1d = [states[i] for i in states_to_plot_idx]
 
 for state in states_to_plot_1d:
     ri_1d = state.find_inner_radius()
-    plot_data_1d["radial_stress"].append(np.array([state.radial_stress(ri_1d, s) * (s / state.compute_r(ri_1d, s)) for s in R_range]))
-    plot_data_1d["hoop_stress"].append(np.array([state.angular_stress(ri_1d, s) * (state.compute_r(ri_1d, s) / s) / (state.gr_interp(s) * state.gt_interp(s)) for s in R_range]))
-    plot_data_1d["radial_strain"].append(np.array([state.radial_strain(ri_1d, s) for s in R_range]))
-    plot_data_1d["hoop_strain"].append(np.array([state.hoop_strain(ri_1d, s) for s in R_range]))
+    plot_data_1d["radial_stress"].append(
+        np.array(
+            [
+                state.radial_stress(ri_1d, s) * (s / state.compute_r(ri_1d, s))
+                for s in R_range
+            ]
+        )
+    )
+    plot_data_1d["hoop_stress"].append(
+        np.array(
+            [
+                state.angular_stress(ri_1d, s)
+                * (state.compute_r(ri_1d, s) / s)
+                / (state.gr_interp(s) * state.gt_interp(s))
+                for s in R_range
+            ]
+        )
+    )
+    plot_data_1d["radial_strain"].append(
+        np.array([state.radial_strain(ri_1d, s) for s in R_range])
+    )
+    plot_data_1d["hoop_strain"].append(
+        np.array([state.hoop_strain(ri_1d, s) for s in R_range])
+    )
     plot_data_1d["radial_growth"].append(state.gr)
     plot_data_1d["hoop_growth"].append(state.gt)
-    plot_data_1d["displacement"].append(np.array([state.compute_r(ri_1d, s) for s in R_range]))
-    plot_data_1d["Ricci"].append(np.array([state.Ricci_curvature(ri_1d, s) for s in R_range]))
+    plot_data_1d["displacement"].append(
+        np.array([state.compute_r(ri_1d, s) for s in R_range])
+    )
+    plot_data_1d["Ricci"].append(
+        np.array([state.Ricci_curvature(ri_1d, s) for s in R_range])
+    )
     plot_data_1d["sr"].append(np.array([state.sr(ri_1d, s) for s in R_range]))
     plot_data_1d["sf"].append(np.array([state.sf(ri_1d, s) for s in R_range]))
-    
+
     # Sigmoid components for hoop (fiber) growth
-    growth_term_gt = np.array([state.growth_term(state.gt_interp(s), state.f_slope) for s in R_range])
-    strain_term_gt = np.array([state.strain_term(state.f_ff_max, state.f_f, state.sf(ri_1d, s), state.sf_setpoint) for s in R_range])
+    growth_term_gt = np.array(
+        [state.growth_term(state.gt_interp(s), state.f_slope) for s in R_range]
+    )
+    strain_term_gt = np.array(
+        [
+            state.strain_term(
+                state.f_ff_max, state.f_f, state.sf(ri_1d, s), state.sf_setpoint
+            )
+            for s in R_range
+        ]
+    )
     plot_data_1d["growth_term_gt"].append(growth_term_gt)
     plot_data_1d["strain_term_gt"].append(strain_term_gt)
-    
+
     # Sigmoid components for radial (cross-fiber) growth
-    growth_term_gr = np.array([state.growth_term(state.gr_interp(s), state.c_slope) for s in R_range])
-    strain_term_gr = np.array([state.strain_term(state.f_cc_max, state.c_c, state.sr(ri_1d, s), state.sc_setpoint) for s in R_range])
+    growth_term_gr = np.array(
+        [state.growth_term(state.gr_interp(s), state.c_slope) for s in R_range]
+    )
+    strain_term_gr = np.array(
+        [
+            state.strain_term(
+                state.f_cc_max, state.c_c, state.sr(ri_1d, s), state.sc_setpoint
+            )
+            for s in R_range
+        ]
+    )
     plot_data_1d["growth_term_gr"].append(growth_term_gr)
     plot_data_1d["strain_term_gr"].append(strain_term_gr)
-    
+
     # Growth increments
     F_inc_t = np.array([state.compute_dgt(ri_1d, s) for s in R_range])
     F_inc_r = np.array([state.compute_dgr(ri_1d, s) for s in R_range])
@@ -185,13 +256,13 @@ for state in states_to_plot_1d:
 # Calculate data between states (power)
 for i in range(number_of_lines - 1):
     state1 = states_to_plot_1d[i]
-    state2 = states_to_plot_1d[i+1]
+    state2 = states_to_plot_1d[i + 1]
     power_direct = BaseState.power_direct(state1, state2, R_range, dt)
     power_data["power"].append(power_direct)
     entropy = BaseState.entropy(state1, state2, R_range, dt)
     power_data["internal_entropy"].append(entropy)
     power_data["entropy"].append(power_direct - entropy)
-    
+
 print("--- Plotting results ---")
 
 data = {
@@ -201,8 +272,11 @@ data = {
     "dt": dt,
     "num_steps": num_steps,
     "number_of_lines": number_of_lines,
-    "set_point": stretch_set_point,
-    }
+    # Stretch-space set points corresponding to Table 1's E_ff*=0.0 and
+    # E_ss*=-0.3, i.e. lambda = sqrt(2*E* + 1)
+    "hoop_set_point": np.sqrt(2 * base_state.E_ff_star + 1),
+    "radial_set_point": np.sqrt(2 * base_state.E_ss_star + 1),
+}
 
 saver.save_data(data, "KOM_ODE_data.json")
 
