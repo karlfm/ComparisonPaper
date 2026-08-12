@@ -77,7 +77,7 @@ def plot_results(file_name):
         plot_data["Homeostasis"],
     )
 
-    plotter_instance.finalize_and_save("ODE_KFR_results.png")
+    plotter_instance.finalize_and_save("KDAB_growth.png")
 
 
 if __name__ == "__main__":

@@ -82,7 +82,7 @@ def main():
     states = [base_state]
     current_state = base_state
 
-    num_steps = 3000
+    num_steps = 2500  # matches KDAB_growth.png caption (2500 steps, sampled every 313)
     for step in range(1, num_steps + 1):  # 2 time steps
         start = time.time()
         if step % 100 == 0:

@@ -54,18 +54,18 @@ class GEGState(BaseState):
         )
 
 
-dt = 0.001  # 0.001
+dt = 0.01  # 1/tau in Table 1
 mu = 1.0
 
 stretch_set_point = np.sqrt(1.1)
-gMax = 0.5
+gMax = 1.5  # gamma_f* in Table 1
 print("Stress set point:", stretch_set_point)
 
 base_state = GEGState(
     R=R_range,
     gr=initial_gr,
     gt=initial_gt,
-    bc=-0.1,
+    bc=-0.15,
     mu=mu,
     gMax=gMax,
     set_point=stretch_set_point,
@@ -82,7 +82,7 @@ stress_data = [base_state.radial_stress(ri, x) for x in stress_points]
 
 states = [base_state]
 prev_state = base_state
-num_steps = 35000  # 32768
+num_steps = 7000  # matches GAPK_strain_growth.png caption (7000 steps, sampled every 875)
 for step in range(1, num_steps + 1):  # 2 time steps
     if step % 100 == 0:
         print(f"Time step {step}")

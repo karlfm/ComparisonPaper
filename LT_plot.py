@@ -78,7 +78,7 @@ def plot_results(file_name):
     )
 
     # Finalize and save
-    plotter_instance.finalize_and_save("ODE_LT2_results.png")
+    plotter_instance.finalize_and_save("LT.png")
 
 
 if __name__ == "__main__":

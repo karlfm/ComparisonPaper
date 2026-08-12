@@ -38,6 +38,11 @@ class KOMState(BaseState):
         self.sf_setpoint = 0.06  # 0.06 # Stimulus at 50% max axial growth
         self.sc_setpoint = 0.07  # 0.07 # Stimulus at 50% max radial growth
 
+        # E_ff*, E_ss* in paper Table 1 - fiber (hoop) and cross-fiber (radial)
+        # strain set points, distinct from each other per the KOM model definition
+        self.E_ff_star = 0.0
+        self.E_ss_star = -0.3
+
     def growth_term(self, growth, slope):
         """
         Slope function to adjust steepness based on current growth state.
@@ -58,7 +63,7 @@ class KOMState(BaseState):
     def sf(self, ri, s):
         E_ff = self.elastic_hoop_strain(ri, s)
 
-        stimulus_l = E_ff - self.set_point
+        stimulus_l = E_ff - self.E_ff_star
         return stimulus_l
 
     def sr(self, ri, s):
@@ -66,7 +71,7 @@ class KOMState(BaseState):
         E_zz = 0.0  # Plane strain assumption
 
         E_cross_max = max(E_rr, E_zz)
-        stimulus_t = E_cross_max - self.set_point
+        stimulus_t = E_cross_max - self.E_ss_star
         return stimulus_t
 
     def compute_dgt(self, ri, s):
@@ -126,7 +131,7 @@ base_state = KOMState(
     R=R_range,
     gr=initial_gr,
     gt=initial_gt,
-    bc=-0.1,
+    bc=-0.15,
     mu=mu,
     gMax=1.5,  # In the other sims this is 0.5, but this is changed due to the sigmoid
     set_point=E_set_point,
@@ -267,7 +272,10 @@ data = {
     "dt": dt,
     "num_steps": num_steps,
     "number_of_lines": number_of_lines,
-    "set_point": stretch_set_point,
+    # Stretch-space set points corresponding to Table 1's E_ff*=0.0 and
+    # E_ss*=-0.3, i.e. lambda = sqrt(2*E* + 1)
+    "hoop_set_point": np.sqrt(2 * base_state.E_ff_star + 1),
+    "radial_set_point": np.sqrt(2 * base_state.E_ss_star + 1),
 }
 
 saver.save_data(data, "KOM_ODE_data.json")

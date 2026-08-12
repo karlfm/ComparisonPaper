@@ -41,7 +41,8 @@ def plot_results(file_name):
     R_range = np.array(data_loaded["R_range"])
     dt = data_loaded["dt"]
     number_of_lines = data_loaded["number_of_lines"]
-    set_point = data_loaded["set_point"]
+    radial_set_point = data_loaded["radial_set_point"]
+    hoop_set_point = data_loaded["hoop_set_point"]
     plot_data = data_loaded["plot_data_1d"]
     power_data = data_loaded["power_data"]
     num_steps = data_loaded["num_steps"]
@@ -61,10 +62,14 @@ def plot_results(file_name):
         "Radial Strain",
         "Strain",
         plot_data["radial_strain"],
-        set_point=set_point,
+        set_point=radial_set_point,
     )
     plotter_instance.plot_spatial_panel(
-        (1, 1), "Hoop Strain", "Strain", plot_data["hoop_strain"], set_point=set_point
+        (1, 1),
+        "Hoop Strain",
+        "Strain",
+        plot_data["hoop_strain"],
+        set_point=hoop_set_point,
     )
     plotter_instance.plot_spatial_panel(
         (0, 2), "Radial Growth", "Growth", plot_data["radial_growth"]
@@ -74,7 +79,7 @@ def plot_results(file_name):
     )
 
     # Finalize and save
-    plotter_instance.finalize_and_save("ODE_KOM_results.png")
+    plotter_instance.finalize_and_save("KOM_growth.png")
 
     # --- Create separate stimulus plot ---
     stimulus_plotter = plotter.ComparisonPlotter(

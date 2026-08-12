@@ -71,7 +71,7 @@ def main():
         R=R_range,
         gr=initial_gr,
         gt=initial_gt,
-        bc=-0.1,
+        bc=-0.15,
         mu=1.0,
         gMax=1.5,
         set_point=stress_set_point,
@@ -98,7 +98,7 @@ def main():
     states = [base_state]
     current_state = base_state
 
-    num_steps = 600
+    num_steps = 300  # matches LT.png caption (300 steps, sampled every 38)
     for step in range(1, num_steps + 1):  # 2 time steps
         print(f"  Iteration {step}/{num_steps}", end="", flush=True)
         # print the displacement at the boundaries

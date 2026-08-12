@@ -55,7 +55,7 @@ class GCGState(BaseState):
         )
 
 
-dt = 0.001
+dt = 0.01  # 1/tau in Table 1
 mu = 1.0
 stretch_set_point = 1.1
 stress_set_point = mu * 0.1  # stretch_set_point**2 - 0.05/2
@@ -66,7 +66,7 @@ base_state = GCGState(
     R=R_range,
     gr=initial_gr,
     gt=initial_gt,
-    bc=-0.1,
+    bc=-0.15,
     mu=mu,
     gMax=gMax,
     set_point=stress_set_point,
@@ -81,7 +81,7 @@ stress_data = [base_state.radial_stress(ri, x) for x in stress_points]
 
 states = [base_state]
 prev_state = base_state
-num_steps = 30000
+num_steps = 3000  # matches GAPK_stress_growth.png caption (3000 steps, sampled every 375)
 for step in range(1, num_steps + 1):  # 2 time steps
     print(f"Time step {step}")
     next_state = prev_state.update()

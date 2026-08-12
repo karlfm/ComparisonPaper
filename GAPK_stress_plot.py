@@ -79,7 +79,7 @@ def plot_results(file_name):
         (1, 2), "Hoop Growth", "Growth", plot_data["hoop_growth"]
     )
     # Finalize and save
-    plotter_instance.finalize_and_save("ODE_GCG_results.png")
+    plotter_instance.finalize_and_save("GAPK_stress_growth.png")
 
     # --- Create separate stimulus plot ---
     stimulus_plotter = plotter.ComparisonPlotter(

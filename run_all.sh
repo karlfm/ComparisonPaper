@@ -8,3 +8,4 @@ python KOM.py
 python KOM_plot.py
 python LT.py
 python LT_plot.py
+python summary_comparison.py

@@ -75,7 +75,7 @@ def plot_results(file_name):
         (1, 2), "Hoop Growth", "Growth", plot_data["hoop_growth"], set_point=gMax
     )
     # Finalize and save
-    plotter_instance.finalize_and_save("ODE_GEG_results.png")
+    plotter_instance.finalize_and_save("GAPK_strain_growth.png")
 
 
 if __name__ == "__main__":
