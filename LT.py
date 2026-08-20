@@ -1,208 +1,306 @@
 import numpy as np
-from cylinder_functions import BaseState
-import time
-import matplotlib.pyplot as plt
-import plotter
-import saver
-class LT2State(BaseState):
-    
-    def compute_dgt(self, ri, s):
+from scipy.optimize import brentq
+import time, sys, os
+import json
 
-        stress_term = self.hoop_cauchy(ri, s)
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "outputs")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+ 
+class VariationalCylinderSolver:
+ 
+    def __init__(self, R, gs, gf, mu, bc, w=1.0, set_point=0.0, gamma=2.0, gMax=1.5):
+        self.R  = np.asarray(R, dtype=float)
+        self.gs = np.asarray(gs, dtype=float)
+        self.gf = np.asarray(gf, dtype=float)
+        self.mu = float(mu)
+        self.bc = float(bc)       # current inner-wall pressure
+        self.w  = float(w)        # dissipation parameter
+        self.N  = len(R)
+        self.dR = np.diff(R)
+        self.set_point = float(set_point)
+        self.gamma = float(gamma)
+        self.gMax = float(gMax)
+ 
+    # Kinematics
+    def compute_r(self, ri):
+        """
+        r^2(R) = ri^2 + 2 * ∫_{Ri}^{R} gamma_s(s) gamma_f(s) s ds
+        integrated with the trapezoidal rule (explicit accumulation, no cumsum).
+        """
+        f = self.gs * self.gf * self.R
 
-        dgt = self.tau * (stress_term - self.set_point) / self.set_point + 1
+        I = np.zeros(self.N, dtype=float)  # I[i] = ∫_{Ri}^{R_i} f(s) ds
+        for i in range(1, self.N):
+            ds = self.R[i] - self.R[i - 1]
+            I[i] = I[i - 1] + 0.5 * (f[i - 1] + f[i]) * ds
+
+        return np.sqrt(ri**2 + 2.0 * I)
+
+    def compute_p(self, r):
+        """
+        Compute pressure by integrating:
+        p(R) = p(R_i) + ∫ μ(2sγf²/r² + 2s²γf/r² · ∂γf/∂s
+                        - s³γsγf³/r⁴ - γs/(sγf)) ds
+        with
+        p(R_i) = μ (R_i^2 / r(R_i)^2) γf(R_i)^2 - σ_rr(R_i).
+        """
+        s = self.R
+
+        # dγf/ds
+        dgf_ds = np.gradient(self.gf, s)
+
+        # Integrand values at grid points
+        integrand = self.mu * (
+            2.0 * s * self.gf**2 / r**2
+            + 2.0 * s**2 * self.gf * dgf_ds / r**2
+            - s**3 * self.gs * self.gf**3 / r**4
+            - self.gs / (s * self.gf)
+        )
+
+        # Inner boundary value p(R_i)
+        Ri = s[0]
+        rRi = r[0]
+        gfRi = self.gf[0]
+        sigma_rr_Ri = -self.bc
+        p_i = self.mu * (Ri**2 / rRi**2) * gfRi**2 - sigma_rr_Ri
+
+        # Trapezoidal integration without cumsum
+        p = np.zeros(self.N, dtype=float)
+        p[0] = p_i
+        for i in range(1, self.N):
+            ds = s[i] - s[i - 1]
+            p[i] = p[i - 1] + 0.5 * (integrand[i - 1] + integrand[i]) * ds
+
+        return p
+
+    # PK1 stress
+    def PK1_radial(self, r, p):
+        """P^{rR} = −μ R γf/(r γs) + p r/(R γs γf)"""
+        R, gs, gf, mu = self.R, self.gs, self.gf, self.mu
+        return mu * R * gf / (r * gs) - p * r / (R * gs * gf)
+ 
+    # Cauchy stress
+    def cauchy_radial(self, r, p):
+        """σ^{rr} = p − μ αs²"""
+        a_s2 = (self.R * self.gf / r)**2
+        return (self.mu * a_s2 - p)
+ 
+    def cauchy_hoop(self, r, p):
+        """σ^{θθ} = p − μ αf²"""
+        a_f2 = (r / (self.R * self.gf))**2
+        return (self.mu * a_f2 - p)
+ 
+    # Root finding: P^{rR}(Ro) = 0
+    def solve(self):
+        def obj(ri):
+            r = self.compute_r(ri)
+            p = self.compute_p(r)
+            # return self.PK1_radial(r, p)[-1]
+            return self.cauchy_radial(r, p)[-1]
+        
+        lo, hi = 0.3 * self.R[0], 8.0 * self.R[-1]
+        pts = np.linspace(lo, hi, 100)
+        vals = np.array([obj(x) for x in pts])
+ 
+        for k in range(len(vals) - 1):
+            if np.isfinite(vals[k]) and np.isfinite(vals[k+1]):
+                if vals[k] > 0 and vals[k+1] < 0:
+                    ri = brentq(obj, pts[k], pts[k+1], xtol=1e-12)
+                    r = self.compute_r(ri)
+                    p = self.compute_p(r)
+                    return ri, r, p
+ 
+        for k in range(len(vals) - 1):
+            if np.isfinite(vals[k]) and np.isfinite(vals[k+1]):
+                if vals[k] * vals[k+1] < 0:
+                    ri = brentq(obj, pts[k], pts[k+1], xtol=1e-12)
+                    r = self.compute_r(ri)
+                    p = self.compute_p(r)
+                    return ri, r, p
+ 
+        raise RuntimeError("No root found")
+ 
+    # Growth rates
+    def growth_rate_r(self, r, p):
+        stress_term = self.cauchy_hoop(r, p)
+        dgt =  (stress_term - self.set_point)
 
         return dgt
+    
+    # Time stepping
+    def run(self, dt, max_steps=10000, tol=1e-4, print_every=500, return_history=False):
+        cur = self
+        history = [cur] if return_history else None
+        for i in range(1, max_steps + 1):
+            _, r, p = cur.solve()
+            # ds = np.zeros_like(cur.growth_rate_s(r, p))
+            dr = cur.growth_rate_r(r, p)
+            mr = np.max(np.abs(dr))
+            if mr < tol:
+                print(f"  converged at step {i}, max|dγ/dt|={mr:.2e}")
+                if return_history:
+                    return cur, history
+                return cur
+            cur = VariationalCylinderSolver(
+                self.R, cur.gs, cur.gf * (1 + dt * dr),
+                self.mu, self.bc, w=self.w
+            )
+            if return_history:
+                history.append(cur)
+            if print_every and i % print_every == 0:
+                print(f"  step {i:>5d}  γs=[{cur.gs.min():.4f},{cur.gs.max():.4f}]"
+                      f"  γf=[{cur.gf.min():.4f},{cur.gf.max():.4f}]"
+                      f"  max|dγ/dt|={mr:.2e}")
+        print(f"  did not converge after {max_steps} steps, max|dγ/dt|={mr:.2e}")
+        if return_history:
+            return cur, history
+        return cur
+ 
 
-    def compute_dgr(self, ri, s):
-        return 1.0
+#  Run
+if __name__ == "__main__":
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+ 
+    R  = np.linspace(1.0, 2.0, 16)
+    N  = len(R)
+    mu = 1.0
+    p = 0.15   # normotensive
+    set_point = mu*0.1
+    gamma = 2.0
+    gMax = 1.5
+ 
+    # 2. Instant elastic response after pressure change (before growth)
+    pressurized = VariationalCylinderSolver(R, np.ones(N), np.ones(N), mu, p, w=1.0, set_point=set_point, gamma=gamma, gMax=gMax)
 
-    def compute_homeostasis(self, ri, s):
-        """
-        Compute homeostatic growth based on the set point stress.
-        Solves the cubic equation for g_theta derived from:
-        g_theta^3 * sigma = mu * (r/R)^2 + p * g_theta^2
-        """
-        sigma = self.set_point
-        if abs(sigma) < 1e-10:
-            return 0.0
-            
-        r = self.compute_r(ri, s)
-        R = s
-        p = self.compute_p(ri, s)
-        mu = self.mu
+    # 3. Grow from the pressurized state
+    final, history = pressurized.run(dt=0.0001, max_steps=10000, tol=1e-3, return_history=True)
+    _, r_f, p_f = final.solve()
 
-        # Terms for S_pm
-        term1 = 2 * p**3 * R**2
-        term2 = 27 * mu * r**2 * sigma**2
-        
-        # Discriminant part
-        # 27 * mu * r^2 * sigma^2 * (4 * p^3 * R^2 + 27 * mu * r^2 * sigma^2)
-        inner_bracket = 4 * p**3 * R**2 + 27 * mu * r**2 * sigma**2
-        discriminant_val = 27 * mu * r**2 * sigma**2 * inner_bracket
-        
-        # Use complex sqrt to handle negative discriminants
-        sqrt_disc = np.sqrt(discriminant_val + 0j)
-        
-        numerator_plus = term1 + term2 + sqrt_disc
-        numerator_minus = term1 + term2 - sqrt_disc
-        
-        denominator = 54 * R**2 * sigma**3
-        
-        S_plus = numerator_plus / denominator
-        S_minus = numerator_minus / denominator
-        
-        # Calculate cube roots
-        g_theta = p / (3 * sigma) + np.power(S_plus, 1/3) + np.power(S_minus, 1/3)
-        
-        return np.real(g_theta)
+    # 8 evenly spaced growth states including first and last
+    n_steps = 8
+    if len(history) >= 2:
+        raw_idx = np.linspace(0, len(history) - 1, num=min(n_steps, len(history)))
+        sampled_idx = np.unique(np.round(raw_idx).astype(int))
+    else:
+        sampled_idx = np.array([0], dtype=int)
+    sampled_states = [history[i] for i in sampled_idx]
+ 
+    # 5. Plot (plotter.py style)
+    sampled_data = []
 
-def main():
-    R_range = np.arange(1, 2 + 1/64, 1/64)
-    # Initialize base state
-    initial_gr = np.ones_like(R_range)  # No initial growth
-    initial_gt = np.ones_like(R_range)
+    try:
+        plt.style.use('seaborn-v0_8-whitegrid')
+    except OSError:
+        plt.style.use('ggplot')
+    plt.rcParams.update({
+        'font.family': 'sans-serif', 'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans'],
+        'font.size': 14, 'axes.titlesize': 20, 'axes.labelsize': 20,
+        'xtick.labelsize': 14, 'ytick.labelsize': 14, 'legend.fontsize': 16,
+        'lines.linewidth': 3, 'grid.alpha': 0.4,
+        'figure.dpi': 300, 'savefig.dpi': 300, 'savefig.bbox': 'tight',
+    })
 
-    dt = 0.001
-    stress_set_point = 0.1
-    base_state = LT2State(
-        R=R_range,
-        gr=initial_gr,
-        gt=initial_gt,
-        bc=-0.1,
-        mu=1.0,
-        gMax=1.5,
-        set_point=stress_set_point,
-        gamma=1,
-        tau=dt,
-        flow_rate = None,
-        viscosity_const = None,
-        robin_k = 0.0
-    )
-    
-    print("Initial state:", base_state)
-    
-    # Initial calculations
-    ri = base_state.find_inner_radius()
-    stress_points = np.arange(1, 2.1, 0.1)
-    stress_data = [base_state.radial_stress(ri, x) for x in stress_points]
-    
-    print(f"\nInitial inner radius: {ri:.15f}")
-    print("Initial stress data:")
-    print("[" + ",".join(f"{x:.15f}" for x in stress_data) + "]")
-    
-    # Iterate state updates
-    print("\nIterating states...")
-    states = [base_state]
-    current_state = base_state
-    
-    num_steps = 600
-    for step in range(1, num_steps + 1):  # 2 time steps
-        print(f"  Iteration {step}/{num_steps}", end="", flush=True)
-        # print the displacement at the boundaries 
-        ri = current_state.find_inner_radius()
-        print(f"  Inner/Other radius displacement: {current_state.compute_r(ri, ri):.15f}, {current_state.compute_r(ri, R_range[-1]):.15f}")
-        start = time.time()
-        current_state = current_state.update()
-        states.append(current_state)
-        print(f" - {time.time()-start:.3f}s")
-    
-    # Final calculations
-    print("\nFinal state:", states[-1])
-    
-    last_state = states[-1]
-    ri = last_state.find_inner_radius()
-    stress_data = [last_state.radial_cauchy(ri, x) for x in stress_points]
+    n_s = len(sampled_states)
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10), sharex='col')
+    fig.suptitle("LT", fontsize=24, fontweight='bold')
 
-    print("\nFinal stress data:")
-    print("[" + ",".join(f"{x:.15f}" for x in stress_data) + "]")
-    
-    # Final gs values
-    gs = [state.gr_interp(np.arange(1, 2 + 1/64, 1/64)).tolist() 
-          for state in states]
-    print("\nFirst gs:", gs[0][:3], "...")
-    print("Last gs:", gs[-1][:3], "...")
-    
+    for j, state in enumerate(sampled_states):
+        _, r_m, p_m = state.solve()
+        alpha = (j + 1) / (n_s + 1)
+        axes[0, 0].plot(R, state.cauchy_radial(r_m, p_m), color='C0', alpha=alpha)
+        axes[1, 0].plot(R, state.cauchy_hoop(r_m, p_m),   color='C0', alpha=alpha)
+        axes[0, 1].plot(R, R * state.gf / r_m,            color='C0', alpha=alpha)
+        axes[1, 1].plot(R, r_m / (R * state.gf),          color='C0', alpha=alpha)
+        axes[0, 2].plot(R, state.gs,                       color='C0', alpha=alpha)
+        axes[1, 2].plot(R, state.gf,                       color='C0', alpha=alpha)
 
-    # --- Pre-calculate all data for plotting ---
+        # Homeostatic γf from eq (27)
+        gf_homeo = (r_m / R) * np.sqrt(mu / (set_point + p_m))
+        axes[1, 2].plot(R, gf_homeo, color='C1', ls='--', lw=2, alpha=0.5)
+
+        sampled_data.append({
+            "sample_number": int(j + 1),
+            "history_index": int(sampled_idx[j]),
+            "R": R.tolist(), "r": r_m.tolist(),
+            "sigma_rr": state.cauchy_radial(r_m, p_m).tolist(),
+            "sigma_tt": state.cauchy_hoop(r_m, p_m).tolist(),
+            "alpha_s": (R * state.gf / r_m).tolist(),
+            "alpha_f": (r_m / (R * state.gf)).tolist(),
+            "gamma_s": state.gs.tolist(),
+            "gamma_f": state.gf.tolist(),
+            "J": (state.gs * state.gf).tolist(),
+        })
+
+    axes[1, 0].axhline(set_point, color='C1', linestyle='--', label='Set Point')
+    axes[0, 0].set(ylabel="Stress", title="Radial Stress (Cauchy)")
+    axes[1, 0].set(ylabel="Stress", title="Hoop Stress (Cauchy)")
+    axes[0, 1].set(ylabel="Stretch", title="Radial Stretch")
+    axes[1, 1].set(ylabel="Stretch", title="Hoop Stretch")
+    axes[0, 2].set(ylabel="Growth", title="Radial Growth")
+    axes[1, 2].set(ylabel="Growth", title="Hoop Growth")
+    for ax in axes.flat:
+        ax.grid(True)
+    for ax in axes[1]:
+        ax.set_xlabel("R")
+    handles = [plt.Line2D([0],[0], color='C0', lw=2), plt.Line2D([0],[0], color='C1', lw=2, linestyle='--')]
+    fig.legend(handles, ['Solution', 'Set-Point'], loc='lower center',
+               bbox_to_anchor=(0.52, -0.06), ncol=2, framealpha=0.9)
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.savefig(os.path.join(OUTPUT_DIR, "LT.png"))
+    plt.close(fig)
+    print(f"Saved LT.png")
+
+    # --- Pre-calculate all data for plotting
     print("--- Pre-calculating data for plots ---")
     plot_data_1d = {
-        "radial_stress": [], "hoop_stress": [], "radial_strain": [],
-        "hoop_strain": [], "radial_growth": [], "hoop_growth": [], "displacement": [],
-        "Ricci": [], "Homeostasis": []
+        "radial_stress": [], "hoop_stress": [], "radial_stretch": [],
+        "hoop_stretch": [], "radial_growth": [], "hoop_growth": [], "displacement": [],
     }
-    
-    power_data = {"power": [], "entropy": [], "internal_entropy": []}
 
-    # Calculate data for each state
-    number_of_lines = 8
-    states_to_plot_idx = np.linspace(0, num_steps, num=number_of_lines, dtype=int)
-    states_to_plot_1d = [states[i] for i in states_to_plot_idx]
+    for state in sampled_states:
+        _, r_m, p_m = state.solve()
+        plot_data_1d["radial_stress"].append((state.cauchy_radial(r_m, p_m)).tolist())
+        plot_data_1d["hoop_stress"].append((state.cauchy_hoop(r_m, p_m)).tolist())
+        plot_data_1d["radial_stretch"].append((R * state.gf / r_m).tolist())
+        plot_data_1d["hoop_stretch"].append((r_m / (R * state.gf)).tolist())
+        plot_data_1d["radial_growth"].append(state.gs.tolist())
+        plot_data_1d["hoop_growth"].append(state.gf.tolist())
+        plot_data_1d["displacement"].append(r_m.tolist())
 
-    for state in states_to_plot_1d:
-        ri_1d = state.find_inner_radius()
-        plot_data_1d["radial_stress"].append(np.array([state.radial_stress(ri_1d, s) * (s / state.compute_r(ri_1d, s)) for s in R_range]))
-        plot_data_1d["hoop_stress"].append(np.array([state.angular_stress(ri_1d, s) * (state.compute_r(ri_1d, s) / s) / (state.gr_interp(s) * state.gt_interp(s)) for s in R_range]))
-        plot_data_1d["radial_strain"].append(np.array([state.radial_strain(ri_1d, s) for s in R_range]))
-        plot_data_1d["hoop_strain"].append(np.array([state.hoop_strain(ri_1d, s) for s in R_range]))
-        plot_data_1d["radial_growth"].append(state.gr)
-        plot_data_1d["hoop_growth"].append(state.gt)
-        plot_data_1d["displacement"].append(np.array([state.compute_r(ri_1d, s) for s in R_range]))
-        plot_data_1d["Ricci"].append(np.array([state.Ricci_curvature(ri_1d, s) for s in R_range]))
-        plot_data_1d["Homeostasis"].append(np.array([state.compute_homeostasis(ri_1d, s) for s in R_range]))
-
-
-    # Calculate data between states (power)
-    for i in range(number_of_lines - 1):
-        state1 = states_to_plot_1d[i]
-        state2 = states_to_plot_1d[i+1]
-        # power_split = KFR.power(state1, state2, R_range, dt)
-        power_direct = BaseState.power_direct(state1, state2, R_range, dt)
-        # power_data["split"].append(power_split)
-        power_data["power"].append(power_direct)
-        entropy = BaseState.entropy(state1, state2, R_range, dt)
-        power_data["internal_entropy"].append(entropy)
-        power_data["entropy"].append(power_direct - entropy)
-        # power_data["difference"].append(power_direct - power_split)
-    
     data = {
         "plot_data_1d": plot_data_1d,
-        "power_data": power_data,
-        "R_range": R_range.tolist(),
-        "dt": dt,
-        "number_of_lines": number_of_lines,
-        "stress_set_point": stress_set_point
+        "R_range": R.tolist(),
+        "mu": float(mu),
+        "p": float(p),
+        "number_of_lines": len(sampled_states),
     }
 
-    saver.save_data(data, "LT2_ODE_data.json")
+    with open(os.path.join(OUTPUT_DIR, "LT_data.json"), "w") as f:
+        json.dump(data, f, indent=2)
+
+    print(f"  Original radiuss: ri = {R[0]:.6f} mm, ro = {R[-1]:.6f} mm")
+    print(f"  Final radii: ri = {r_f[0]:.6f} mm, ro = {r_f[-1]:.6f} mm")
+    print(f" Net growth (integral over domain): J(Ri) = {np.trapezoid(final.gs * final.gf, final.R):.6f}")
     
-    # print("--- Plotting results ---")
+    export_data = {
+        "metadata": {
+            "mu": float(mu),
+            "p": float(p),
+            "dt": 0.0001,
+            "max_steps": 20000,
+            "tol": 1e-4,
+            "n_grid": int(N),
+            "n_history_states": int(len(history)),
+            "n_sampled_states": int(len(sampled_states)),
+        },
+        "R": R.tolist(),
+        "r_final": r_f.tolist(),
+        "sampled_indices": sampled_idx.tolist(),
+        "states": sampled_data,
+    }
+    with open(os.path.join(OUTPUT_DIR, "LT.json"), "w", encoding="utf-8") as f:
+        json.dump(export_data, f, indent=2)
 
-    # # --- Use the Plotter Class ---
-    # plotter_instance = plotter.ComparisonPlotter(R_range, number_of_lines, model_name="LT2")
-
-    # # Plot spatial data
-    # plotter_instance.plot_spatial_panel((0, 0), "Radial Stress (Cauchy)", "Stress", plot_data_1d["radial_stress"])
-    # plotter_instance.plot_spatial_panel((1, 0), "Hoop Stress (Cauchy)", "Stress", plot_data_1d["hoop_stress"], set_point=stress_set_point)
-    # plotter_instance.plot_spatial_panel((0, 1), "Radial Strain", "Strain", plot_data_1d["radial_strain"])
-    # plotter_instance.plot_spatial_panel((1, 1), "Hoop Strain", "Strain", plot_data_1d["hoop_strain"])
-    # plotter_instance.plot_spatial_panel((0, 2), "Radial Growth", "Growth", plot_data_1d["radial_growth"])
-    # plotter_instance.plot_spatial_panel((1, 2), "Hoop Growth", "Growth", plot_data_1d["hoop_growth"], plot_data_1d["Homeostasis"])
-    # plotter_instance.plot_spatial_panel((2, 0), "Displacement (r)", "Displacement", plot_data_1d["displacement"])
-
-    # # Plot special cases
-    # plotter_instance.plot_ricci((2, 1), plot_data_1d["Ricci"])
-    # plotter_instance.plot_dissipation((2, 2), power_data, dt)
-
-    # # Finalize and save
-    # plotter_instance.finalize_and_save("ODE_LT2_results.png")
-
-    # # plot_and_save(states[:-1], R_range, time=time_points)
-
-if __name__ == "__main__":
-    start_time = time.time()
-    main()
-    total_time = time.time() - start_time
-    print(f"\n✓ Total execution time: {total_time:.2f} seconds")
-
-    
+    print("Saved plot.")

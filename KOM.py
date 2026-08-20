@@ -1,226 +1,403 @@
-from cylinder_functions import BaseState
 import numpy as np
-import saver
+from scipy.optimize import brentq
+import os, json
 
-''' 1D Solution '''
-#region
-# Initialize base state
-R_range = np.linspace(1.0, 2.0, 64)
-initial_gt = np.ones_like(R_range)
-initial_gr = np.ones_like(R_range)
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "outputs")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-dt = 0.01
-mu = 1.0
-stretch_set_point = 1.01
-# Convert stretch set point to Green-Lagrange strain for KOM model
-# s_set = 0.5 * (lambda^2 - 1)
-E_set_point = 0.5 * (stretch_set_point**2 - 1)
 
-class KOMState(BaseState):
+class VariationalCylinderSolver:
     """
-    Implementation of the Kerckhoffs-Omens-McCulloch (KOM) growth law.
-    Reference: Kerckhoffs et al. (2012)
+    Shared mechanics solver for a pressurised incompressible neo-Hookean
+    cylinder with multiplicative growth  F = A G.
     """
-    def __init__(self, R, gr, gt, bc, mu, gMax, set_point, gamma, tau, params=None):
-        super().__init__(R, gr, gt, bc, mu, gMax, set_point, gamma, tau)
-        
-        self.f_cc_max = 0.1  #f_cc,max in paper - Max fiber growth rate
-        self.f_ff_max = 0.3  #f_ff,max in paper - Max radial growth rate
-        
-        self.f_f = 150.0 # f_f in paper - Slope affecting sigmoid for fiber growth
-        self.c_c = 75.0  # c_f in paper - Slope affecting sigmoid for radial growth
 
-        self.f_slope = 40.0 # f_length,slope in paper    - Slope affecting sigmoid for *total* fiber growth
-        self.c_slope = 60.0 # c_thickness,slope in paper - Slope affecting sigmoif for *total* radial growth
-        
-        self.sf_setpoint = 0.06 #0.06 # Stimulus at 50% max axial growth
-        self.sc_setpoint = 0.07 #0.07 # Stimulus at 50% max radial growth
+    def __init__(self, R, gs, gf, mu, bc):
+        self.R  = np.asarray(R, dtype=float)
+        self.gs = np.asarray(gs, dtype=float)
+        self.gf = np.asarray(gf, dtype=float)
+        self.mu = float(mu)
+        self.bc = float(bc)
+        self.N  = len(R)
 
-    def growth_term(self, growth, slope):
-        """
-        Slope function to adjust steepness based on current growth state.
-        """
-        return 1 / (1.0 + np.exp(slope * (growth - self.gMax)))
-    
-    def strain_term(self, height, slope, s, s_50):
-        """
-        Generic sigmoid function based on Eq 8 and 9
-        g_inc = A / (1 + exp(-slope * (s - s50))) + 1
-        """
-        
-        if s >= 0:
-            return height / (1.0 + np.exp(-slope * (s - s_50)))
-        elif s < 0:
-            return -height / (1.0 + np.exp(slope * (s + s_50)))
+    def compute_r(self, ri):
+        f = self.gs * self.gf * self.R
+        I = np.zeros(self.N, dtype=float)
+        for i in range(1, self.N):
+            ds = self.R[i] - self.R[i - 1]
+            I[i] = I[i - 1] + 0.5 * (f[i - 1] + f[i]) * ds
+        return np.sqrt(np.maximum(ri**2 + 2.0 * I, 0.0))
 
-    def sf(self, ri, s):
-        E_ff = self.elastic_hoop_strain(ri, s)
-        
-        stimulus_l = E_ff - self.set_point
-        return stimulus_l
-    
-    def sr(self, ri, s):
-        E_rr = self.elastic_radial_strain(ri, s)
-        E_zz = 0.0 # Plane strain assumption
-        
-        E_cross_max = max(E_rr, E_zz)
-        stimulus_t = E_cross_max - self.set_point
-        return stimulus_t
-
-    def compute_dgt(self, ri, s):
-        """
-        Fiber (Hoop) Growth.
-        Stimulus: s_l = max(E_ff) - E_set   
-        """
-
-        stimulus_f = self.sf(ri, s)
-        
-        _growth_term = self.growth_term(self.gt_interp(s), self.f_slope)
-        _strain_term = self.strain_term(self.f_ff_max, self.f_f, stimulus_f, self.sf_setpoint)
-        
-        return self.tau * _growth_term * _strain_term + 1
-
-    def compute_dgr(self, ri, s):
-        """
-        Cross-Fiber (Radial) Growth.
-        Stimulus: s_t = max(E_rr, E_zz) - E_set   
-        """
-
-        stimulus_r = self.sr(ri, s)
-        
-        _growth_term = self.growth_term(self.gr_interp(s), self.c_slope)
-        _strain_term = self.strain_term(self.f_cc_max, self.c_c, stimulus_r, self.sc_setpoint)
-
-        return np.sqrt(self.tau * _growth_term * _strain_term + 1)
-    
-    def update(self):
-        ri = self.find_inner_radius()
-
-        F_inc_t = np.array([self.compute_dgt(ri, s) for s in self.R])
-        new_gt = self.gt * F_inc_t
-        
-        F_inc_r = np.array([self.compute_dgr(ri, s) for s in self.R])
-        new_gr = self.gr * F_inc_r
-
-        return self.__class__(
-            self.R, new_gr, new_gt, self.bc, self.mu,
-            self.gMax, self.set_point, self.gamma, self.tau
+    def compute_p(self, r):
+        s = self.R
+        dgf_ds = np.gradient(self.gf, s)
+        integrand = self.mu * (
+            2.0 * s * self.gf**2 / r**2
+            + 2.0 * s**2 * self.gf * dgf_ds / r**2
+            - s**3 * self.gs * self.gf**3 / r**4
+            - self.gs / (s * self.gf)
         )
+        Ri, rRi, gfRi = s[0], r[0], self.gf[0]
+        p_i = self.mu * (Ri**2 / rRi**2) * gfRi**2 + self.bc
+        p = np.zeros(self.N, dtype=float)
+        p[0] = p_i
+        for i in range(1, self.N):
+            ds = s[i] - s[i - 1]
+            p[i] = p[i - 1] + 0.5 * (integrand[i - 1] + integrand[i]) * ds
+        return p
 
-print("Using Green-Lagrange set point:", E_set_point)
-base_state = KOMState(
-    R=R_range,
-    gr=initial_gr,
-    gt=initial_gt,
-    bc=-0.1,
-    mu=mu,
-    gMax=1.5, # In the other sims this is 0.5, but this is changed due to the sigmoid
-    set_point=E_set_point,
-    gamma=1,
-    tau=dt
-)
+    def cauchy_radial(self, r, p):
+        return self.mu * (self.R * self.gf / r)**2 - p
 
-print("Initial state:", base_state)
+    def cauchy_hoop(self, r, p):
+        return self.mu * (r / (self.R * self.gf))**2 - p
 
-states = [base_state]
-prev_state = base_state
-num_steps = 3000 #32768
-for step in range(1, num_steps + 1):
-    if step % 10 == 0:
-        print(f"Time step {step}")
-    next_state = prev_state.update()
-    states.append(next_state)
-    prev_state = next_state
-#endregion
+    def alpha_s(self, r):
+        return self.R * self.gf / r
 
-# --- Pre-calculate all data for plotting ---
-print("--- Pre-calculating data for plots ---")
-plot_data_1d = {
-    "radial_stress": [], "hoop_stress": [], "radial_strain": [],
-    "hoop_strain": [], "radial_growth": [], "hoop_growth": [], "displacement": [],
-    "Ricci": [], "sr": [], "sf": [],
-    # Sigmoid components
-    "growth_term_gt": [], "growth_term_gr": [],  # Growth limiting sigmoids
-    "strain_term_gt": [], "strain_term_gr": [],  # Strain-based sigmoids
-    "F_inc_t": [], "F_inc_r": []  # Growth increments
-}
-power_data = {"power": [], "entropy": [], "internal_entropy": []}
+    def alpha_f(self, r):
+        return r / (self.R * self.gf)
 
-# Calculate data for each state
-number_of_lines = 8
-states_to_plot_idx = np.linspace(0, num_steps, num=number_of_lines, dtype=int)
-states_to_plot_1d = [states[i] for i in states_to_plot_idx]
+    def green_lagrange_ss(self, r):
+        """E_ss = ½(α_s² − 1)"""
+        return 0.5 * (self.alpha_s(r)**2 - 1.0)
 
-for state in states_to_plot_1d:
-    ri_1d = state.find_inner_radius()
-    plot_data_1d["radial_stress"].append(np.array([state.radial_stress(ri_1d, s) * (s / state.compute_r(ri_1d, s)) for s in R_range]))
-    plot_data_1d["hoop_stress"].append(np.array([state.angular_stress(ri_1d, s) * (state.compute_r(ri_1d, s) / s) / (state.gr_interp(s) * state.gt_interp(s)) for s in R_range]))
-    plot_data_1d["radial_strain"].append(np.array([state.radial_strain(ri_1d, s) for s in R_range]))
-    plot_data_1d["hoop_strain"].append(np.array([state.hoop_strain(ri_1d, s) for s in R_range]))
-    plot_data_1d["radial_growth"].append(state.gr)
-    plot_data_1d["hoop_growth"].append(state.gt)
-    plot_data_1d["displacement"].append(np.array([state.compute_r(ri_1d, s) for s in R_range]))
-    plot_data_1d["Ricci"].append(np.array([state.Ricci_curvature(ri_1d, s) for s in R_range]))
-    plot_data_1d["sr"].append(np.array([state.sr(ri_1d, s) for s in R_range]))
-    plot_data_1d["sf"].append(np.array([state.sf(ri_1d, s) for s in R_range]))
-    
-    # Sigmoid components for hoop (fiber) growth
-    growth_term_gt = np.array([state.growth_term(state.gt_interp(s), state.f_slope) for s in R_range])
-    strain_term_gt = np.array([state.strain_term(state.f_ff_max, state.f_f, state.sf(ri_1d, s), state.sf_setpoint) for s in R_range])
-    plot_data_1d["growth_term_gt"].append(growth_term_gt)
-    plot_data_1d["strain_term_gt"].append(strain_term_gt)
-    
-    # Sigmoid components for radial (cross-fiber) growth
-    growth_term_gr = np.array([state.growth_term(state.gr_interp(s), state.c_slope) for s in R_range])
-    strain_term_gr = np.array([state.strain_term(state.f_cc_max, state.c_c, state.sr(ri_1d, s), state.sc_setpoint) for s in R_range])
-    plot_data_1d["growth_term_gr"].append(growth_term_gr)
-    plot_data_1d["strain_term_gr"].append(strain_term_gr)
-    
-    # Growth increments
-    F_inc_t = np.array([state.compute_dgt(ri_1d, s) for s in R_range])
-    F_inc_r = np.array([state.compute_dgr(ri_1d, s) for s in R_range])
-    plot_data_1d["F_inc_t"].append(F_inc_t)
-    plot_data_1d["F_inc_r"].append(F_inc_r)
+    def green_lagrange_ff(self, r):
+        """E_ff = ½(α_f² − 1)"""
+        return 0.5 * (self.alpha_f(r)**2 - 1.0)
 
-# Calculate data between states (power)
-for i in range(number_of_lines - 1):
-    state1 = states_to_plot_1d[i]
-    state2 = states_to_plot_1d[i+1]
-    power_direct = BaseState.power_direct(state1, state2, R_range, dt)
-    power_data["power"].append(power_direct)
-    entropy = BaseState.entropy(state1, state2, R_range, dt)
-    power_data["internal_entropy"].append(entropy)
-    power_data["entropy"].append(power_direct - entropy)
-    
-print("--- Plotting results ---")
+    def solve(self, ri_guess=None):
+        def obj(ri):
+            r = self.compute_r(ri)
+            p = self.compute_p(r)
+            return self.cauchy_radial(r, p)[-1]
 
-data = {
-    "plot_data_1d": plot_data_1d,
-    "power_data": power_data,
-    "R_range": R_range.tolist(),
-    "dt": dt,
-    "num_steps": num_steps,
-    "number_of_lines": number_of_lines,
-    "set_point": stretch_set_point,
+        if ri_guess is not None and ri_guess > 0:
+            delta = 0.3 * ri_guess
+            lo_g, hi_g = max(0.1, ri_guess - delta), ri_guess + delta
+            try:
+                v_lo, v_hi = obj(lo_g), obj(hi_g)
+                if np.isfinite(v_lo) and np.isfinite(v_hi) and v_lo * v_hi < 0:
+                    ri = brentq(obj, lo_g, hi_g, xtol=1e-12)
+                    r = self.compute_r(ri)
+                    p = self.compute_p(r)
+                    return ri, r, p
+            except Exception:
+                pass
+
+        lo, hi = 0.3 * self.R[0], 20.0 * self.R[-1]
+        pts = np.linspace(lo, hi, 100)
+        vals = np.array([obj(x) for x in pts])
+
+        for k in range(len(vals) - 1):
+            if np.isfinite(vals[k]) and np.isfinite(vals[k+1]):
+                if vals[k] < 0 and vals[k+1] > 0:
+                    ri = brentq(obj, pts[k], pts[k+1], xtol=1e-12)
+                    r = self.compute_r(ri)
+                    p = self.compute_p(r)
+                    return ri, r, p
+
+        for k in range(len(vals) - 1):
+            if np.isfinite(vals[k]) and np.isfinite(vals[k+1]):
+                if vals[k] * vals[k+1] < 0:
+                    ri = brentq(obj, pts[k], pts[k+1], xtol=1e-12)
+                    r = self.compute_r(ri)
+                    p = self.compute_p(r)
+                    return ri, r, p
+
+        raise RuntimeError("No root found")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  KOM growth law  (eq 9)
+#
+#  Strain-driven growth in BOTH radial and circumferential
+#  directions via sigmoid functions with growth limits.
+#
+#  Stimuli:
+#    s_s = E_ss − E*_ss       (radial Green-Lagrange strain)
+#    s_f = E_ff − E*_ff       (fiber  Green-Lagrange strain)
+#
+#  Radial update (with √):
+#    γ_s^{i+1} = γ_s^i · (sigmoid_term + 1)^{1/2}
+#
+#  Hoop update (no √):
+#    γ_f^{i+1} = γ_f^i · (sigmoid_term + 1)
+# ══════════════════════════════════════════════════════════════════
+def run_kom(R, mu, bc, params, max_steps=3000, tol=1e-6, print_every=500):
+    """
+    Run the KOM growth law.  `params` is a dict with all KOM parameters.
+    Returns (final_solver, history_list).
+    """
+    # Unpack parameters
+    fff_max  = params["fff_max"]
+    fcc_max  = params["fcc_max"]
+    sf_star  = params["sf_star"]
+    ss_star  = params["ss_star"]
+    dt_kom   = params["dt"]
+    ff       = params["ff"]
+    cs       = params["cs"]
+    f_slope  = params["f_slope"]
+    c_slope  = params["c_slope"]
+    gs_lim   = params["gamma_star_s"]
+    gf_lim   = params["gamma_star_f"]
+    Ess_star = params["Ess_star"]
+    Eff_star = params["Eff_star"]
+
+    N  = len(R)
+    gs = np.ones(N)
+    gf = np.ones(N)
+
+    cur = VariationalCylinderSolver(R, gs, gf, mu, bc)
+    history = [cur]
+    ri_prev = None
+
+    for i in range(1, max_steps + 1):
+        ri_prev, r, p = cur.solve(ri_guess=ri_prev)
+
+        # Green-Lagrange strains
+        Ess = cur.green_lagrange_ss(r)
+        Eff = cur.green_lagrange_ff(r)
+
+        # Growth stimuli (Kerckhoffs eqs 5–6)
+        # Fiber stimulus: s_l = E_ff − E*_ff
+        sf = Eff - Eff_star
+        # Cross-fiber stimulus: s_t = min(E_cross,max) − E*_ss
+        # In plane strain E_zz = 0, so E_cross,max = max(E_ss, 0);
+        # for a static loading min_over_cycle = that single value.
+        # When E_ss < 0: max(E_ss, 0) = 0
+        Ecross = np.minimum(Ess, 0.0)   # min(E_rr, E_zz=0)
+        ss = Ecross - Ess_star
+
+        # Radial growth (γ_s)
+        k_cc = 1.0 / (1.0 + np.exp(f_slope * (cur.gs - gs_lim)))
+
+        # Sigmoid growth rate — note (ss + ss_star) in negative branch
+        rad_pos = k_cc * fcc_max * dt_kom / (1.0 + np.exp(-cs * (ss - ss_star)))
+        rad_neg = -fcc_max * dt_kom / (1.0 + np.exp(cs * (ss + ss_star)))
+        rad_term = np.where(ss >= 0, rad_pos, rad_neg)
+
+        new_gs = cur.gs * np.sqrt(np.maximum(rad_term + 1.0, 0.0))
+
+        # Hoop growth (γ_f)
+        k_ff = 1.0 / (1.0 + np.exp(c_slope * (cur.gf - gf_lim)))
+
+        # note (sf + sf_star) in negative branch
+        hoop_pos = k_ff * fff_max * dt_kom / (1.0 + np.exp(-ff * (sf - sf_star)))
+        hoop_neg = -fff_max * dt_kom / (1.0 + np.exp(ff * (sf + sf_star)))
+        hoop_term = np.where(sf >= 0, hoop_pos, hoop_neg)
+
+        new_gf = cur.gf * (hoop_term + 1.0)
+
+        # Convergence check
+        dgamma = max(np.max(np.abs(new_gs - cur.gs)),
+                     np.max(np.abs(new_gf - cur.gf)))
+
+        cur = VariationalCylinderSolver(R, new_gs, new_gf, mu, bc)
+        history.append(cur)
+
+        if dgamma < tol:
+            print(f"  converged at step {i}, max|Δγ|={dgamma:.2e}")
+            return cur, history
+
+        if print_every and i % print_every == 0:
+            print(f"  step {i:>5d}  γs=[{cur.gs.min():.4f},{cur.gs.max():.4f}]"
+                  f"  γf=[{cur.gf.min():.4f},{cur.gf.max():.4f}]"
+                  f"  max|Δγ|={dgamma:.2e}")
+
+    print(f"  did not converge after {max_steps} steps, max|Δγ|={dgamma:.2e}")
+    return cur, history
+
+
+#  Main — reproduce paper Figure 7
+if __name__ == "__main__":
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    # Parameters
+    R   = np.linspace(1.0, 2.0, 65)
+    N   = len(R)
+    mu  = 1.0
+    bc  = 0.15 * mu
+
+    params = dict(
+        fff_max      = 0.3,
+        fcc_max      = 0.1,
+        sf_star      = 0.06,
+        ss_star      = 0.07,
+        dt           = 0.01,
+        ff           = 150.0,
+        cs           = 75.0,
+        f_slope      = 40.0,
+        c_slope      = 60.0,
+        gamma_star_s = 1.5,
+        gamma_star_f = 1.5,
+        Ess_star     = -0.3,
+        Eff_star     = 0.0,
+    )
+    n_steps = 3000
+
+    print(f"KOM model:  {n_steps} steps, grid N={N}")
+    print(f"  bc={bc}, μ={mu}")
+
+    # Run
+    final, history = run_kom(R, mu, bc, params,
+                             max_steps=n_steps, print_every=500)
+    _, r_f, p_f = final.solve()
+
+    # Sample 8 evenly-spaced states
+    n_lines = 8
+    raw_idx = np.linspace(0, len(history) - 1, num=min(n_lines, len(history)))
+    sampled_idx = np.unique(np.round(raw_idx).astype(int))
+    sampled = [history[i] for i in sampled_idx]
+
+    #  Plot
+    import matplotlib.ticker as mticker
+
+    try:
+        plt.style.use('seaborn-v0_8-whitegrid')
+    except OSError:
+        plt.style.use('ggplot')
+
+    plt.rcParams.update({
+        'font.family':          'sans-serif',
+        'font.sans-serif':      ['Arial', 'Helvetica', 'DejaVu Sans'],
+        'font.size':            14,
+        'axes.titlesize':       20,
+        'axes.labelsize':       20,
+        'xtick.labelsize':      14,
+        'ytick.labelsize':      14,
+        'legend.fontsize':      16,
+        'legend.title_fontsize': 16,
+        'legend.frameon':       True,
+        'legend.framealpha':    0.95,
+        'legend.fancybox':      True,
+        'lines.linewidth':      3,
+        'grid.alpha':           0.4,
+        'figure.dpi':           300,
+        'savefig.dpi':          300,
+        'savefig.bbox':         'tight',
+    })
+
+    # ──Colour: single hue with alpha ramp (matching plotter.py) ──
+    n_s = len(sampled)
+
+    # ── Main 2×3 figure ───────────────────────────────────────────
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10), sharex='col')
+    fig.suptitle("KOM", fontsize=24, fontweight='bold')
+
+    # Stretch set-points from Green-Lagrange set-points
+    alpha_s_sp = np.sqrt(max(2.0 * params["Ess_star"] + 1.0, 0.0))
+    alpha_f_sp = np.sqrt(max(2.0 * params["Eff_star"] + 1.0, 0.0))
+
+    # Panel definitions: (row, col, title, ylabel, data_key, set_point)
+    panels = [
+        (0, 0, "Radial Stress (Cauchy)", "Stress",  "radial_stress",  None),
+        (1, 0, "Hoop Stress (Cauchy)",   "Stress",  "hoop_stress",    None),
+        (0, 1, "Radial Stretch",         "Stretch",  "radial_stretch", alpha_s_sp if alpha_s_sp > 0 else None),
+        (1, 1, "Hoop Stretch",           "Stretch",  "hoop_stretch",   alpha_f_sp if alpha_f_sp > 0 else None),
+        (0, 2, "Radial Growth",          "Growth",  "radial_growth", None),#,  params["gamma_star_s"]),
+        (1, 2, "Hoop Growth",            "Growth",  "hoop_growth", None)#,    params["gamma_star_f"]),
+    ]
+
+    # Pre-compute all panel data
+    panel_data = {
+        "radial_stress": [], "hoop_stress": [],
+        "radial_stretch": [], "hoop_stretch": [],
+        "radial_growth": [], "hoop_growth": [],
     }
+    for state in sampled:
+        _, r_m, p_m = state.solve()
+        panel_data["radial_stress"].append(state.cauchy_radial(r_m, p_m))
+        panel_data["hoop_stress"].append(state.cauchy_hoop(r_m, p_m))
+        panel_data["radial_stretch"].append(state.alpha_s(r_m))
+        panel_data["hoop_stretch"].append(state.alpha_f(r_m))
+        panel_data["radial_growth"].append(state.gs)
+        panel_data["hoop_growth"].append(state.gf)
 
-saver.save_data(data, "KOM_ODE_data.json")
+    for row, col, title, ylabel, key, sp in panels:
+        ax = axes[row, col]
+        ax.set_title(title)
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel("R")
+        ax.grid(True)
 
-# # --- Use the Plotter Class ---
-# plotter_instance = plotter.ComparisonPlotter(R_range, num_steps, model_name="KOM")
+        if sp is not None:
+            ax.axhline(sp, color='C1', linestyle='--', label='Set Point')
 
-# # Plot spatial data
-# plotter_instance.plot_spatial_panel((0, 0), "Radial Stress (Cauchy)", "Stress", plot_data_1d["radial_stress"])
-# plotter_instance.plot_spatial_panel((1, 0), "Hoop Stress (Cauchy)", "Stress", plot_data_1d["hoop_stress"])
-# plotter_instance.plot_spatial_panel((0, 1), "Radial Strain", "Strain", plot_data_1d["radial_strain"])
-# plotter_instance.plot_spatial_panel((1, 1), "Hoop Strain", "Strain", plot_data_1d["hoop_strain"])
-# plotter_instance.plot_spatial_panel((0, 2), "Radial Growth", "Growth", plot_data_1d["radial_growth"])
-# plotter_instance.plot_spatial_panel((1, 2), "Hoop Growth", "Growth", plot_data_1d["hoop_growth"])
-# plotter_instance.plot_spatial_panel((2, 0), "Displacement (r)", "Displacement", plot_data_1d["displacement"])
+        for i, d in enumerate(panel_data[key]):
+            alpha = (i + 1) / (n_s + 1)
+            ax.plot(R, d, color='C0', alpha=alpha)
 
-# # Plot special cases
-# plotter_instance.plot_spatial_panel((2, 1), "Stimulus L", "Stimulus", plot_data_1d["sl"], set_point=E_set_point)
-# plotter_instance.plot_spatial_panel((2, 2), "Stimulus T", "Stimulus", plot_data_1d["st"], set_point=E_set_point)
+    # Legend
+    handles = [
+        plt.Line2D([0], [0], color='C0', lw=2),
+        plt.Line2D([0], [0], color='C1', lw=2, linestyle='--'),
+    ]
+    labels = ['Solution', 'Set-Point']
+    fig.legend(handles, labels, loc='lower center',
+               bbox_to_anchor=(0.52, -0.06), ncol=2, framealpha=0.9)
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.savefig(os.path.join(OUTPUT_DIR, "KOM_growth.png"))
+    fig.savefig(os.path.join(OUTPUT_DIR, "KOM_growth.pdf"))
+    plt.close(fig)
+    print(f"Saved KOM_growth.png / .pdf")
 
-# # Finalize and save
-# plotter_instance.finalize_and_save("ODE_KOM_results.png")
+    #  Residual stress (same style)
+    res = VariationalCylinderSolver(R, final.gs, final.gf, mu, 0.0)
+    ri_res, r_res, p_res = res.solve()
+    srr_res = res.cauchy_radial(r_res, p_res)
+    stt_res = res.cauchy_hoop(r_res, p_res)
+
+    fig2, ax2 = plt.subplots(1, 2, figsize=(12, 5))
+    fig2.suptitle("KOM — Residual Stress", fontsize=24, fontweight='bold')
+
+    for ax, data, title, ylabel in zip(
+            ax2,
+            [srr_res, stt_res],
+            ["Residual Radial Stress", "Residual Hoop Stress"],
+            ["Stress", "Stress"]):
+        ax.plot(R, data, color='C0')
+        ax.set(title=title, ylabel=ylabel, xlabel="R")
+        ax.grid(True)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
+    fig2.savefig(os.path.join(OUTPUT_DIR, "KOM_residual.png"))
+    fig2.savefig(os.path.join(OUTPUT_DIR, "KOM_residual.pdf"))
+    plt.close(fig2)
+    print(f"Saved KOM_residual.png / .pdf")
+
+    # Summary
+    print(f"\n  Original radii:  Ri={R[0]:.4f},  Ro={R[-1]:.4f}")
+    print(f"  Final radii:     ri={r_f[0]:.6f},  ro={r_f[-1]:.6f}")
+    print(f"  Final γs range:  [{final.gs.min():.6f}, {final.gs.max():.6f}]")
+    print(f"  Final γf range:  [{final.gf.min():.6f}, {final.gf.max():.6f}]")
+    print(f"  Residual σ^rr:   [{srr_res.min():.6f}, {srr_res.max():.6f}]")
+    print(f"  Residual σ^θθ:   [{stt_res.min():.6f}, {stt_res.max():.6f}]")
+
+    # Export JSON
+    plot_data_1d = {
+        "radial_stress": [], "hoop_stress": [], "radial_stretch": [],
+        "hoop_stretch": [], "radial_growth": [], "hoop_growth": [],
+        "displacement": [],
+    }
+    for state in sampled:
+        _, r_m, p_m = state.solve()
+        plot_data_1d["radial_stress"].append(state.cauchy_radial(r_m, p_m).tolist())
+        plot_data_1d["hoop_stress"].append(state.cauchy_hoop(r_m, p_m).tolist())
+        plot_data_1d["radial_stretch"].append(state.alpha_s(r_m).tolist())
+        plot_data_1d["hoop_stretch"].append(state.alpha_f(r_m).tolist())
+        plot_data_1d["radial_growth"].append(state.gs.tolist())
+        plot_data_1d["hoop_growth"].append(state.gf.tolist())
+        plot_data_1d["displacement"].append(r_m.tolist())
+
+    data = {
+        "plot_data_1d": plot_data_1d,
+        "R_range": R.tolist(),
+        "mu": mu, "bc": bc, "params": params,
+        "number_of_lines": len(sampled),
+    }
+    with open(os.path.join(OUTPUT_DIR, "KOM_data.json"), "w") as f:
+        json.dump(data, f, indent=2)
+    print("Saved KOM_data.json")
